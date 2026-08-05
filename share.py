@@ -69,45 +69,146 @@ class SilentHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
         pass
 class ProgressHTTPRequestHandler(SilentHTTPRequestHandler):
     def do_GET(self):
-        path = self.translate_path(self.path)
-        if os.path.isdir(path):
-            self.send_response(200)
-            self.send_header("Content-type", "text/html; charset=utf-8")
-            self.end_headers()
-            listing = os.listdir(path)
-            listing.sort(key=lambda a: (not os.path.isdir(os.path.join(path, a)), a.lower()))
-            lan_ip = get_lan_ip()
-            lan_url = f"http://{lan_ip}:{self.server.server_address[1]}"
-            html_content = f"""
-          HTML
-          """
-            self.wfile.write(html_content.encode('utf-8'))
-        else:
-            try:
-                file_size = os.path.getsize(path)
+            """处理文件浏览与下载"""
+            path = self.translate_path(self.path)
+            if os.path.isdir(path):
+                if not self.path.endswith('/'):
+                    self.send_response(301)
+                    self.send_header('Location', self.path + '/')
+                    self.end_headers()
+                    return
+
                 self.send_response(200)
-                self.send_header("Content-Type", "application/octet-stream")
-                self.send_header("Content-Disposition", f'attachment; filename="{os.path.basename(path)}"')
-                self.send_header("Content-Length", str(file_size))
+                self.send_header("Content-type", "text/html; charset=utf-8")
                 self.end_headers()
-                if file_size < 10 * 1024 * 1024:
-                    chunk_size = 256 * 1024
-                elif file_size < 100 * 1024 * 1024:
-                    chunk_size = 512 * 1024
-                else:
-                    chunk_size = 1024 * 1024 
-                with open(path, 'rb') as f:
-                    with tqdm.tqdm(total=file_size, unit='B', unit_scale=True, 
-                                   desc=f"📥 下载 {os.path.basename(path)}", 
-                                   ncols=72) as pbar:
-                        while True:
-                            chunk = f.read(chunk_size)
-                            if not chunk:
-                                break
-                            self.wfile.write(chunk)
-                            pbar.update(len(chunk))
-            except OSError:
-                self.send_error(404, "File not found")
+
+                listing = os.listdir(path)
+                listing.sort(key=lambda a: (not os.path.isdir(os.path.join(path, a)), a.lower()))
+
+                lan_ip = get_lan_ip()
+                lan_url = f"http://{lan_ip}:{self.server.server_address[1]}"
+
+                html_content = f"""
+          HTML
+    """
+                if self.path != '/' and self.path != '':
+                    html_content += '<li><span class="icon">⬆️</span><a href="../">返回上一级</a></li>'
+                for name in listing:
+                    fullname = os.path.join(path, name)
+                    is_dir = os.path.isdir(fullname)
+                    icon = "📁" if is_dir else "📄"
+                    display_name = name + ("/" if is_dir else "")
+                    link_path = urllib.parse.quote(name) + ("/" if is_dir else "")
+                    html_content += f'<li><span class="icon">{icon}</span><a href="{link_path}">{html.escape(display_name)}</a></li>'
+                html_content += """
+                </ul>
+            </div>
+        </div>
+
+        <script>
+            new QRCode(document.getElementById("qrcode"), {
+                text: \"""" + lan_url + """\",
+                width: 145,
+                height: 145
+            });
+            document.getElementById('uploadFileForm').addEventListener('submit', function(e) {
+                e.preventDefault();
+                const fileInput = document.getElementById('fileInput');
+                const files = fileInput.files;
+                if (files.length === 0) return;
+                let currentIndex = 0;
+                const totalFiles = files.length;
+                document.getElementById('progressPercent').innerText = `0 / ${totalFiles}`;
+                document.getElementById('progressDetail').innerText = `准备上传 ${totalFiles} 个文件...`;
+                document.getElementById('progressContainer').style.display = 'block';
+                document.getElementById('uploadBtn').disabled = true;
+                document.getElementById('uploadBtn').value = '⏫ 上传中...';
+                function uploadNextFile() {
+                    if (currentIndex >= totalFiles) {
+                        document.getElementById('progressBar').style.background = 'linear-gradient(135deg, #11998e 0%, #38ef7d 130%)';
+                        document.getElementById('progressPercent').innerText = '✅ 全部完成';
+                        document.getElementById('progressDetail').innerText = `${totalFiles} 个文件上传成功`;
+                        document.getElementById('progressBar').style.animation = 'none';
+                       setTimeout(function() {
+                            window.location.reload();
+                        }, 1600);
+                        return;
+                    }
+                    const file = files[currentIndex];
+                    const formData = new FormData();
+                    formData.append('file', file);
+                    const xhr = new XMLHttpRequest();
+                    xhr.open('POST', '.', true);
+                    xhr.upload.onprogress = function(event) {
+                        if (event.lengthComputable) {
+                            const percent = Math.round((event.loaded / event.total) * 100);
+                            document.getElementById('progressBar').style.width = percent + '%';
+                            document.getElementById('progressPercent').innerText = 
+                                `文件 ${currentIndex + 1}/${totalFiles} - ${percent}%`;
+                            const formatSize = (bytes) => {
+                                if (bytes === 0) return '0 B';
+                                const k = 1024;
+                                const sizes = ['B', 'KB', 'MB', 'GB'];
+                                const i = Math.floor(Math.log(bytes) / Math.log(k));
+                                const val = (bytes / Math.pow(k, i)).toFixed(i === 0 ? 0 : 1);
+                                return val + ' ' + sizes[i];
+                            };
+                            document.getElementById('progressDetail').innerText = 
+                                `${file.name}: ${formatSize(event.loaded)} / ${formatSize(event.total)}`;
+                        }
+                    };
+                    xhr.onload = function() {
+                        if (xhr.status >= 200 && xhr.status < 300) {
+                            console.log(`✅ ${file.name} 上传成功`);
+                            currentIndex++;
+                            document.getElementById('progressBar').style.width = '0%';
+                            uploadNextFile();
+                        } else {
+                            alert(`❌ ${file.name} 上传失败`);
+                            document.getElementById('uploadBtn').disabled = false;
+                            document.getElementById('uploadBtn').value = '开始上传文件';
+                        }
+                    };
+                    xhr.onerror = function() {
+                        alert(`❌ ${file.name} 网络连接失败`);
+                        document.getElementById('uploadBtn').disabled = false;
+                        document.getElementById('uploadBtn').value = '开始上传文件';
+                    };
+                    xhr.send(formData);
+                }
+                uploadNextFile();
+            });
+        </script>
+    </body>
+    </html>
+    """
+                self.wfile.write(html_content.encode('utf-8'))
+            else:
+                try:
+                    file_size = os.path.getsize(path)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/octet-stream")
+                    self.send_header("Content-Disposition", f'attachment; filename="{os.path.basename(path)}"')
+                    self.send_header("Content-Length", str(file_size))
+                    self.end_headers()
+                    if file_size < 10 * 1024 * 1024:
+                        chunk_size = 256 * 1024
+                    elif file_size < 100 * 1024 * 1024:
+                        chunk_size = 512 * 1024
+                    else:
+                        chunk_size = 1024 * 1024
+                    with open(path, 'rb') as f:
+                        with tqdm.tqdm(total=file_size, unit='B', unit_scale=True, 
+                                       desc=f"📥 下载 {os.path.basename(path)}", 
+                                       ncols=72) as pbar:
+                            while True:
+                                chunk = f.read(chunk_size)
+                                if not chunk:
+                                    break
+                                self.wfile.write(chunk)
+                                pbar.update(len(chunk))
+                except OSError:
+                    self.send_error(404, "File not found")
     def do_POST(self):
         """处理文件与文本的上传"""
         content_type = self.headers.get('Content-Type')
@@ -203,7 +304,7 @@ if __name__ == "__main__":
     print_terminal_qrcode(lan_url)
     print(f"  📱 手机扫描上方二维码即可访问")
     print("=" * 57)
-    print(f"  By.hikari　　版本：1.0.0802（高速传输版）")
+    print(f"  By.hikari　　版本：1.2.0805（高速传输版）")
     print("  按 Ctrl+C 停止服务或直接关闭窗口")
     print("=" * 56)
     try:
